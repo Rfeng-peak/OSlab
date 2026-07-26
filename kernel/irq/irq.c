@@ -1,0 +1,116 @@
+#include <os/irq.h>
+#include <os/time.h>
+#include <os/sched.h>
+#include <os/string.h>
+#include <os/kernel.h>
+#include <os/net.h>
+#include <printk.h>
+#include <assert.h>
+#include <screen.h>
+#include <csr.h>
+#include <plic.h>
+
+handler_t irq_table[IRQC_COUNT];
+handler_t exc_table[EXCC_COUNT];
+
+void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
+{
+    // TODO: [p2-task3] & [p2-task4] interrupt handler.
+    // call corresponding handler by the value of `scause`
+    uint64_t code = scause & ~SCAUSE_IRQ_FLAG;
+
+    if (scause & SCAUSE_IRQ_FLAG)
+    {
+        if (code < IRQC_COUNT && irq_table[code])
+            irq_table[code](regs, stval, scause);
+        else
+            handle_other(regs, stval, scause);
+    }
+    else
+    {
+        if (code < EXCC_COUNT && exc_table[code])
+            exc_table[code](regs, stval, scause);
+        else
+            handle_other(regs, stval, scause);
+    }
+}
+
+__attribute__((aligned(4096)))
+void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
+{
+    // TODO: [p2-task4] clock interrupt handler.
+    // Note: use bios_set_timer to reset the timer and remember to reschedule
+    bios_set_timer(get_ticks() + TIMER_INTERVAL);
+    screen_reflush();
+    asm volatile("fence.i" ::: "memory");
+    do_scheduler();
+
+    (void)regs;
+    (void)stval;
+    (void)scause;
+}
+
+void handle_irq_ext(regs_context_t *regs, uint64_t stval, uint64_t scause)
+{
+    /* Claim the interrupt from PLIC to get the IRQ number */
+    uint32_t hwirq = plic_claim();
+
+    if (hwirq == PLIC_E1000_QEMU_IRQ) {
+        /* E1000 network interrupt */
+        net_handle_irq();
+    } else if (hwirq != 0) {
+        printk("> [IRQ] Unknown external interrupt: %d\n", hwirq);
+    }
+
+    /* Complete the interrupt to allow future interrupts */
+    if (hwirq != 0) {
+        plic_complete(hwirq);
+    }
+
+    (void)regs;
+    (void)stval;
+    (void)scause;
+}
+
+void init_exception()
+{
+    /* TODO: [p2-task3] initialize exc_table */
+    /* NOTE: handle_syscall, handle_other, etc.*/
+    for (int i = 0; i < EXCC_COUNT; i++)
+        exc_table[i] = handle_other;
+    exc_table[EXCC_SYSCALL] = handle_syscall;
+
+    /* TODO: [p2-task4] initialize irq_table */
+    /* NOTE: handle_int, handle_other, etc.*/
+    for (int i = 0; i < IRQC_COUNT; i++)
+        irq_table[i] = handle_other;
+    irq_table[IRQC_S_TIMER] = handle_irq_timer;
+    irq_table[IRQC_S_EXT]   = handle_irq_ext;
+
+    /* TODO: [p2-task3] set up the entrypoint of exceptions */
+    setup_exception();
+}
+
+void handle_other(regs_context_t *regs, uint64_t stval, uint64_t scause)
+{
+    char* reg_name[] = {
+        "zero "," ra  "," sp  "," gp  "," tp  ",
+        " t0  "," t1  "," t2  ","s0/fp"," s1  ",
+        " a0  "," a1  "," a2  "," a3  "," a4  ",
+        " a5  "," a6  "," a7  "," s2  "," s3  ",
+        " s4  "," s5  "," s6  "," s7  "," s8  ",
+        " s9  "," s10 "," s11 "," t3  "," t4  ",
+        " t5  "," t6  "
+    };
+    for (int i = 0; i < 32; i += 3) {
+        for (int j = 0; j < 3 && i + j < 32; ++j) {
+            printk("%s : %016lx ",reg_name[i+j], regs->regs[i+j]);
+        }
+        printk("\n\r");
+    }
+    printk("sstatus: 0x%lx sbadaddr: 0x%lx scause: %lu\n\r",
+           regs->sstatus, regs->sbadaddr, regs->scause);
+    printk("sepc: 0x%lx\n\r", regs->sepc);
+    printk("tval: 0x%lx cause: 0x%lx\n", stval, scause);
+    assert(0);
+}
